@@ -459,6 +459,9 @@ type GatewayConfig struct {
 	// UsageRecord: 使用量记录异步队列配置（有界队列 + 固定 worker）
 	UsageRecord GatewayUsageRecordConfig `mapstructure:"usage_record"`
 
+	// RequestLog: 请求/响应日志（JSONL 文件）用于训练数据收集
+	RequestLog GatewayRequestLogConfig `mapstructure:"request_log"`
+
 	// UserGroupRateCacheTTLSeconds: 用户分组倍率热路径缓存 TTL（秒）
 	UserGroupRateCacheTTLSeconds int `mapstructure:"user_group_rate_cache_ttl_seconds"`
 	// ModelsListCacheTTLSeconds: /v1/models 模型列表短缓存 TTL（秒）
@@ -637,6 +640,13 @@ type GatewayUsageRecordConfig struct {
 	AutoScaleCheckIntervalSeconds int `mapstructure:"auto_scale_check_interval_seconds"`
 	// AutoScaleCooldownSeconds: 自动扩缩容冷却时间（秒）
 	AutoScaleCooldownSeconds int `mapstructure:"auto_scale_cooldown_seconds"`
+}
+
+// GatewayRequestLogConfig 请求/响应日志配置（JSONL 文件）
+type GatewayRequestLogConfig struct {
+	Enabled   bool     `mapstructure:"enabled"`
+	Dir       string   `mapstructure:"dir"`
+	Platforms []string `mapstructure:"platforms"`
 }
 
 // SoraModelFiltersConfig Sora 模型过滤配置
@@ -1332,6 +1342,10 @@ func setDefaults() {
 	viper.SetDefault("gateway.max_account_switches_gemini", 3)
 	viper.SetDefault("gateway.force_codex_cli", false)
 	viper.SetDefault("gateway.openai_passthrough_allow_timeout_headers", false)
+	// RequestLog: 请求/响应 JSONL 日志（默认关闭）
+	viper.SetDefault("gateway.request_log.enabled", false)
+	viper.SetDefault("gateway.request_log.dir", "data/request_logs")
+	viper.SetDefault("gateway.request_log.platforms", []string{"openai"})
 	// OpenAI Responses WebSocket（默认开启；可通过 force_http 紧急回滚）
 	viper.SetDefault("gateway.openai_ws.enabled", true)
 	viper.SetDefault("gateway.openai_ws.mode_router_v2_enabled", false)

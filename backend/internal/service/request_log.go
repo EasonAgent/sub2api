@@ -1,0 +1,116 @@
+package service
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+)
+
+var requestLogMu sync.Mutex
+
+type requestLogRecord struct {
+	Ts               int64            `json:"ts"`
+	UserID           int64            `json:"user_id,omitempty"`
+	APIKeyID         int64            `json:"api_key_id,omitempty"`
+	RequestBody      json.RawMessage  `json:"request_body"`
+	ResponseComplete json.RawMessage  `json:"response_complete,omitempty"`
+	ResponseBody     *json.RawMessage `json:"response_body,omitempty"`
+}
+
+func (s *OpenAIGatewayService) requestLogEnabled() bool {
+	return s.cfg != nil && s.cfg.Gateway.RequestLog.Enabled
+}
+
+func (s *OpenAIGatewayService) writeRequestLog(c *gin.Context, requestBody, responseData []byte) {
+	if len(requestBody) == 0 && len(responseData) == 0 {
+		return
+	}
+
+	rec := requestLogRecord{
+		Ts:          time.Now().Unix(),
+		APIKeyID:    getAPIKeyIDFromContext(c),
+		RequestBody: json.RawMessage(requestBody),
+	}
+	if len(responseData) > 0 {
+		rec.ResponseComplete = json.RawMessage(responseData)
+	}
+
+	line, err := json.Marshal(rec)
+	if err != nil {
+		logger.FromContext(c.Request.Context()).Warn("request_log: marshal failed", zap.Error(err))
+		return
+	}
+	line = append(line, '\n')
+
+	dir := s.cfg.Gateway.RequestLog.Dir
+	if dir == "" {
+		dir = "data/request_logs"
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		logger.FromContext(c.Request.Context()).Warn("request_log: mkdir failed", zap.Error(err))
+		return
+	}
+
+	filename := filepath.Join(dir, time.Now().Format("2006-01-02")+".jsonl")
+
+	requestLogMu.Lock()
+	defer requestLogMu.Unlock()
+
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		logger.FromContext(c.Request.Context()).Warn("request_log: open file failed", zap.Error(err))
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(line)
+}
+
+func (s *OpenAIGatewayService) writeRequestLogNonStreaming(c *gin.Context, requestBody, responseBody []byte) {
+	if len(requestBody) == 0 && len(responseBody) == 0 {
+		return
+	}
+
+	resp := json.RawMessage(responseBody)
+	rec := requestLogRecord{
+		Ts:           time.Now().Unix(),
+		APIKeyID:     getAPIKeyIDFromContext(c),
+		RequestBody:  json.RawMessage(requestBody),
+		ResponseBody: &resp,
+	}
+
+	line, err := json.Marshal(rec)
+	if err != nil {
+		logger.FromContext(c.Request.Context()).Warn("request_log: marshal failed", zap.Error(err))
+		return
+	}
+	line = append(line, '\n')
+
+	dir := s.cfg.Gateway.RequestLog.Dir
+	if dir == "" {
+		dir = "data/request_logs"
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		logger.FromContext(c.Request.Context()).Warn("request_log: mkdir failed", zap.Error(err))
+		return
+	}
+
+	filename := filepath.Join(dir, time.Now().Format("2006-01-02")+".jsonl")
+
+	requestLogMu.Lock()
+	defer requestLogMu.Unlock()
+
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		logger.FromContext(c.Request.Context()).Warn("request_log: open file failed", zap.Error(err))
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(line)
+}

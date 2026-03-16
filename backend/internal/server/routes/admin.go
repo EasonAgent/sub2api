@@ -523,5 +523,6 @@ func registerRequestLogRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	{
 		requestLogs.GET("/lookup", h.Admin.RequestLog.Lookup)
 		requestLogs.GET("/stats", h.Admin.RequestLog.Stats)
+		requestLogs.GET("/list", h.Admin.RequestLog.List)
 	}
 }

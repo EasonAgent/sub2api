@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"strconv"
+
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -37,6 +39,37 @@ func (h *RequestLogHandler) Lookup(c *gin.Context) {
 	}
 
 	response.Success(c, rec)
+}
+
+// List returns lightweight record summaries for a given date with pagination.
+// GET /api/v1/admin/request-logs/list?date=2026-03-13&offset=0&limit=20
+func (h *RequestLogHandler) List(c *gin.Context) {
+	date := c.Query("date")
+	if date == "" {
+		response.BadRequest(c, "date query parameter is required (YYYY-MM-DD)")
+		return
+	}
+
+	offset := 0
+	limit := 20
+	if v := c.Query("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
+			limit = n
+		}
+	}
+
+	result, err := h.readerService.ListByDate(date, offset, limit)
+	if err != nil {
+		response.Error(c, 500, "Failed to list request logs: "+err.Error())
+		return
+	}
+
+	response.Success(c, result)
 }
 
 // Stats returns aggregated statistics about stored request logs.

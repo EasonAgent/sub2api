@@ -176,6 +176,123 @@ func (s *RequestLogReaderService) GetStats() (*RequestLogStats, error) {
 	return stats, nil
 }
 
+// RequestLogSummary is a lightweight record summary for list views.
+type RequestLogSummary struct {
+	ResponseID string `json:"response_id"`
+	Ts         int64  `json:"ts"`
+	APIKeyID   int64  `json:"api_key_id"`
+	Model      string `json:"model"`
+}
+
+// RequestLogListResult holds paginated list results.
+type RequestLogListResult struct {
+	Records []RequestLogSummary `json:"records"`
+	Total   int64               `json:"total"`
+	Offset  int                 `json:"offset"`
+	Limit   int                 `json:"limit"`
+}
+
+// ListByDate returns lightweight record summaries for a given date with pagination.
+func (s *RequestLogReaderService) ListByDate(date string, offset, limit int) (*RequestLogListResult, error) {
+	dir := s.logDir()
+	filePath := filepath.Join(dir, date+".jsonl")
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &RequestLogListResult{Records: []RequestLogSummary{}, Offset: offset, Limit: limit}, nil
+		}
+		return nil, fmt.Errorf("open log file: %w", err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+	var all []RequestLogSummary
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		summary := extractSummary(line)
+		all = append(all, summary)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan log file: %w", err)
+	}
+
+	total := int64(len(all))
+
+	// Reverse to show newest first
+	for i, j := 0, len(all)-1; i < j; i, j = i+1, j-1 {
+		all[i], all[j] = all[j], all[i]
+	}
+
+	// Apply pagination
+	start := offset
+	if start > len(all) {
+		start = len(all)
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+
+	return &RequestLogListResult{
+		Records: all[start:end],
+		Total:   total,
+		Offset:  offset,
+		Limit:   limit,
+	}, nil
+}
+
+// extractSummary extracts lightweight fields from a JSONL line without full parsing.
+func extractSummary(line []byte) RequestLogSummary {
+	var raw struct {
+		Ts               int64           `json:"ts"`
+		APIKeyID         int64           `json:"api_key_id"`
+		RequestBody      json.RawMessage `json:"request_body"`
+		ResponseComplete json.RawMessage `json:"response_complete"`
+	}
+	_ = json.Unmarshal(line, &raw)
+
+	summary := RequestLogSummary{
+		Ts:       raw.Ts,
+		APIKeyID: raw.APIKeyID,
+	}
+
+	// Extract model from request_body.model
+	if len(raw.RequestBody) > 0 {
+		var rb struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(raw.RequestBody, &rb)
+		summary.Model = rb.Model
+	}
+
+	// Extract response_id from response_complete.response.id
+	if len(raw.ResponseComplete) > 0 {
+		var wrapper struct {
+			Response struct {
+				ID string `json:"id"`
+			} `json:"response"`
+		}
+		if json.Unmarshal(raw.ResponseComplete, &wrapper) == nil && wrapper.Response.ID != "" {
+			summary.ResponseID = wrapper.Response.ID
+		} else {
+			var direct struct {
+				ID string `json:"id"`
+			}
+			if json.Unmarshal(raw.ResponseComplete, &direct) == nil {
+				summary.ResponseID = direct.ID
+			}
+		}
+	}
+
+	return summary
+}
+
 func countLines(filePath string) int64 {
 	f, err := os.Open(filePath)
 	if err != nil {

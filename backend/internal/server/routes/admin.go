@@ -81,6 +81,9 @@ func RegisterAdminRoutes(
 
 		// 定时测试计划
 		registerScheduledTestRoutes(admin, h)
+
+		// 请求日志查询
+		registerRequestLogRoutes(admin, h)
 	}
 }
 
@@ -512,5 +515,13 @@ func registerErrorPassthroughRoutes(admin *gin.RouterGroup, h *handler.Handlers)
 		rules.POST("", h.Admin.ErrorPassthrough.Create)
 		rules.PUT("/:id", h.Admin.ErrorPassthrough.Update)
 		rules.DELETE("/:id", h.Admin.ErrorPassthrough.Delete)
+	}
+}
+
+func registerRequestLogRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	requestLogs := admin.Group("/request-logs")
+	{
+		requestLogs.GET("/lookup", h.Admin.RequestLog.Lookup)
+		requestLogs.GET("/stats", h.Admin.RequestLog.Stats)
 	}
 }

@@ -226,6 +226,9 @@ type OpenAIForwardResult struct {
 	ResponseHeaders http.Header
 	Duration        time.Duration
 	FirstTokenMs    *int
+	// CompletedEventData holds the raw response.completed JSON for request logging.
+	// Populated by the Anthropic→OpenAI forwarding path (ForwardAsAnthropic).
+	CompletedEventData []byte
 }
 
 type OpenAIWSRetryMetricsSnapshot struct {

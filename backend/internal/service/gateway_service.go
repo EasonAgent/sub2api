@@ -3966,6 +3966,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	reqModel := parsed.Model
 	reqStream := parsed.Stream
 	originalModel := reqModel
+	originalBody := parsed.Body // request_log: preserve original request body before modifications
 
 	isClaudeCode := isClaudeCodeRequest(ctx, c, parsed)
 	shouldMimicClaudeCode := account.IsOAuth() && !isClaudeCode
@@ -4446,10 +4447,19 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		usage = streamResult.usage
 		firstTokenMs = streamResult.firstTokenMs
 		clientDisconnect = streamResult.clientDisconnect
+		// request_log: write Anthropic streaming response log asynchronously
+		if s.requestLogEnabled() && streamResult.finalResponseLog != nil {
+			go s.writeAnthropicRequestLog(c, originalBody, streamResult.finalResponseLog)
+		}
 	} else {
-		usage, err = s.handleNonStreamingResponse(ctx, resp, c, account, originalModel, reqModel)
+		var respBody []byte
+		usage, respBody, err = s.handleNonStreamingResponse(ctx, resp, c, account, originalModel, reqModel)
 		if err != nil {
 			return nil, err
+		}
+		// request_log: write Anthropic non-streaming response log asynchronously
+		if s.requestLogEnabled() && len(respBody) > 0 {
+			go s.writeAnthropicRequestLogNonStreaming(c, originalBody, respBody)
 		}
 	}
 
@@ -4663,10 +4673,19 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthrough(
 		usage = streamResult.usage
 		firstTokenMs = streamResult.firstTokenMs
 		clientDisconnect = streamResult.clientDisconnect
+		// request_log: write Anthropic passthrough streaming response log
+		if s.requestLogEnabled() && streamResult.finalResponseLog != nil {
+			go s.writeAnthropicRequestLog(c, body, streamResult.finalResponseLog)
+		}
 	} else {
-		usage, err = s.handleNonStreamingResponseAnthropicAPIKeyPassthrough(ctx, resp, c, account)
+		var respBody []byte
+		usage, respBody, err = s.handleNonStreamingResponseAnthropicAPIKeyPassthrough(ctx, resp, c, account)
 		if err != nil {
 			return nil, err
+		}
+		// request_log: write Anthropic passthrough non-streaming response log
+		if s.requestLogEnabled() && len(respBody) > 0 {
+			go s.writeAnthropicRequestLogNonStreaming(c, body, respBody)
 		}
 	}
 	if usage == nil {
@@ -4775,6 +4794,13 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 	var firstTokenMs *int
 	clientDisconnected := false
 
+	// request_log: accumulate SSE events for response reconstruction
+	var respAccumulator *anthropicResponseAccumulator
+	if s.requestLogEnabled() {
+		respAccumulator = newAnthropicResponseAccumulator()
+	}
+	var currentEventName string // tracks SSE event: name for accumulator
+
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
 	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
@@ -4836,7 +4862,11 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					// 兜底补刷，确保最后一个未以空行结尾的事件也能及时送达客户端。
 					flusher.Flush()
 				}
-				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
+				var logData []byte
+				if respAccumulator != nil {
+					logData = respAccumulator.Build()
+				}
+				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected, finalResponseLog: logData}, nil
 			}
 			if ev.err != nil {
 				if clientDisconnected {
@@ -4856,6 +4886,10 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 			}
 
 			line := ev.line
+			// request_log: track SSE event name for accumulator
+			if strings.HasPrefix(line, "event:") {
+				currentEventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			}
 			if data, ok := extractAnthropicSSEDataLine(line); ok {
 				trimmed := strings.TrimSpace(data)
 				if firstTokenMs == nil && trimmed != "" && trimmed != "[DONE]" {
@@ -4863,6 +4897,13 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					firstTokenMs = &ms
 				}
 				s.parseSSEUsagePassthrough(data, usage)
+				// request_log: feed event into accumulator
+				if respAccumulator != nil && trimmed != "" && trimmed != "[DONE]" {
+					respAccumulator.ProcessEvent(currentEventName, []byte(trimmed))
+				}
+				currentEventName = "" // reset after data line
+			} else if line == "" {
+				currentEventName = "" // reset on empty line (event boundary)
 			}
 
 			if !clientDisconnected {
@@ -5020,7 +5061,7 @@ func (s *GatewayService) handleNonStreamingResponseAnthropicAPIKeyPassthrough(
 	resp *http.Response,
 	c *gin.Context,
 	account *Account,
-) (*ClaudeUsage, error) {
+) (*ClaudeUsage, []byte, error) {
 	if s.rateLimitService != nil {
 		s.rateLimitService.UpdateSessionWindow(ctx, account, resp.Header)
 	}
@@ -5038,7 +5079,7 @@ func (s *GatewayService) handleNonStreamingResponseAnthropicAPIKeyPassthrough(
 				},
 			})
 		}
-		return nil, err
+		return nil, nil, err
 	}
 
 	usage := parseClaudeUsageFromResponseBody(body)
@@ -5049,7 +5090,7 @@ func (s *GatewayService) handleNonStreamingResponseAnthropicAPIKeyPassthrough(
 		contentType = "application/json"
 	}
 	c.Data(resp.StatusCode, contentType, body)
-	return usage, nil
+	return usage, body, nil
 }
 
 func writeAnthropicPassthroughResponseHeaders(dst http.Header, src http.Header, filter *responseheaders.CompiledHeaderFilter) {
@@ -5912,7 +5953,8 @@ func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *ht
 type streamingResult struct {
 	usage            *ClaudeUsage
 	firstTokenMs     *int
-	clientDisconnect bool // 客户端是否在流式传输过程中断开
+	clientDisconnect bool   // 客户端是否在流式传输过程中断开
+	finalResponseLog []byte // 累积的最终响应 JSON（用于 request_log）
 }
 
 func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel string, mimicClaudeCode bool) (*streamingResult, error) {
@@ -6028,6 +6070,12 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 	needModelReplace := originalModel != mappedModel
 	clientDisconnected := false // 客户端断开标志，断开后继续读取上游以获取完整usage
 
+	// request_log: 累积 Anthropic SSE 事件以重建最终响应 JSON
+	var respAccumulator *anthropicResponseAccumulator
+	if s.requestLogEnabled() {
+		respAccumulator = newAnthropicResponseAccumulator()
+	}
+
 	pendingEventLines := make([]string, 0, 4)
 
 	processSSEEvent := func(lines []string) ([]string, string, *sseUsagePatch, error) {
@@ -6050,6 +6098,11 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 
 		if eventName == "error" {
 			return nil, dataLine, nil, errors.New("have error in stream")
+		}
+
+		// request_log: feed event into accumulator for final response reconstruction
+		if respAccumulator != nil && dataLine != "" && dataLine != "[DONE]" {
+			respAccumulator.ProcessEvent(eventName, []byte(dataLine))
 		}
 
 		if dataLine == "" {
@@ -6156,7 +6209,11 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 		case ev, ok := <-events:
 			if !ok {
 				// 上游完成，返回结果
-				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
+				var logData []byte
+				if respAccumulator != nil {
+					logData = respAccumulator.Build()
+				}
+				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected, finalResponseLog: logData}, nil
 			}
 			if ev.err != nil {
 				// 检测 context 取消（客户端断开会导致 context 取消，进而影响上游读取）
@@ -6477,7 +6534,7 @@ func rewriteCacheCreationJSON(usageObj map[string]any, target string) bool {
 	return true
 }
 
-func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, originalModel, mappedModel string) (*ClaudeUsage, error) {
+func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, originalModel, mappedModel string) (*ClaudeUsage, []byte, error) {
 	// 更新5h窗口状态
 	s.rateLimitService.UpdateSessionWindow(ctx, account, resp.Header)
 
@@ -6494,7 +6551,7 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
 				},
 			})
 		}
-		return nil, err
+		return nil, nil, err
 	}
 
 	// 解析usage
@@ -6502,7 +6559,7 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
 		Usage ClaudeUsage `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, fmt.Errorf("parse response: %w", err)
+		return nil, nil, fmt.Errorf("parse response: %w", err)
 	}
 
 	// 解析嵌套的 cache_creation 对象中的 5m/1h 明细
@@ -6555,7 +6612,7 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
 	// 写入响应
 	c.Data(resp.StatusCode, contentType, body)
 
-	return &response.Usage, nil
+	return &response.Usage, body, nil
 }
 
 // replaceModelInResponseBody 替换响应体中的model字段

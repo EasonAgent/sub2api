@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 )
 
@@ -24,8 +25,47 @@ type requestLogRecord struct {
 	ResponseBody     *json.RawMessage `json:"response_body,omitempty"`
 }
 
+// requestLogCfgEnabled checks if request logging is enabled in the config.
+func requestLogCfgEnabled(cfg *config.Config) bool {
+	return cfg != nil && cfg.Gateway.RequestLog.Enabled
+}
+
+// writeRequestLogRecord writes a pre-built requestLogRecord to the JSONL file.
+func writeRequestLogRecord(c *gin.Context, cfg *config.Config, rec requestLogRecord) {
+	line, err := json.Marshal(rec)
+	if err != nil {
+		logger.FromContext(c.Request.Context()).Warn("request_log: marshal failed", zap.Error(err))
+		return
+	}
+	line = append(line, '\n')
+
+	dir := cfg.Gateway.RequestLog.Dir
+	if dir == "" {
+		dir = "data/request_logs"
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		logger.FromContext(c.Request.Context()).Warn("request_log: mkdir failed", zap.Error(err))
+		return
+	}
+
+	filename := filepath.Join(dir, time.Now().Format("2006-01-02")+".jsonl")
+
+	requestLogMu.Lock()
+	defer requestLogMu.Unlock()
+
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		logger.FromContext(c.Request.Context()).Warn("request_log: open file failed", zap.Error(err))
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(line)
+}
+
+// --- OpenAIGatewayService methods (existing) ---
+
 func (s *OpenAIGatewayService) requestLogEnabled() bool {
-	return s.cfg != nil && s.cfg.Gateway.RequestLog.Enabled
+	return requestLogCfgEnabled(s.cfg)
 }
 
 func (s *OpenAIGatewayService) writeRequestLog(c *gin.Context, requestBody, responseData []byte) {
@@ -42,34 +82,7 @@ func (s *OpenAIGatewayService) writeRequestLog(c *gin.Context, requestBody, resp
 		rec.ResponseComplete = json.RawMessage(responseData)
 	}
 
-	line, err := json.Marshal(rec)
-	if err != nil {
-		logger.FromContext(c.Request.Context()).Warn("request_log: marshal failed", zap.Error(err))
-		return
-	}
-	line = append(line, '\n')
-
-	dir := s.cfg.Gateway.RequestLog.Dir
-	if dir == "" {
-		dir = "data/request_logs"
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		logger.FromContext(c.Request.Context()).Warn("request_log: mkdir failed", zap.Error(err))
-		return
-	}
-
-	filename := filepath.Join(dir, time.Now().Format("2006-01-02")+".jsonl")
-
-	requestLogMu.Lock()
-	defer requestLogMu.Unlock()
-
-	f, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		logger.FromContext(c.Request.Context()).Warn("request_log: open file failed", zap.Error(err))
-		return
-	}
-	defer f.Close()
-	_, _ = f.Write(line)
+	writeRequestLogRecord(c, s.cfg, rec)
 }
 
 func (s *OpenAIGatewayService) writeRequestLogNonStreaming(c *gin.Context, requestBody, responseBody []byte) {
@@ -85,32 +98,47 @@ func (s *OpenAIGatewayService) writeRequestLogNonStreaming(c *gin.Context, reque
 		ResponseBody: &resp,
 	}
 
-	line, err := json.Marshal(rec)
-	if err != nil {
-		logger.FromContext(c.Request.Context()).Warn("request_log: marshal failed", zap.Error(err))
+	writeRequestLogRecord(c, s.cfg, rec)
+}
+
+// --- GatewayService methods (Anthropic /v1/messages) ---
+
+func (s *GatewayService) requestLogEnabled() bool {
+	return requestLogCfgEnabled(s.cfg)
+}
+
+// writeAnthropicRequestLog writes a request log entry for Anthropic streaming responses.
+// responseData is the accumulated final response JSON (built from SSE events).
+func (s *GatewayService) writeAnthropicRequestLog(c *gin.Context, requestBody, responseData []byte) {
+	if len(requestBody) == 0 && len(responseData) == 0 {
 		return
 	}
-	line = append(line, '\n')
 
-	dir := s.cfg.Gateway.RequestLog.Dir
-	if dir == "" {
-		dir = "data/request_logs"
+	rec := requestLogRecord{
+		Ts:          time.Now().Unix(),
+		APIKeyID:    getAPIKeyIDFromContext(c),
+		RequestBody: json.RawMessage(requestBody),
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		logger.FromContext(c.Request.Context()).Warn("request_log: mkdir failed", zap.Error(err))
+	if len(responseData) > 0 {
+		rec.ResponseComplete = json.RawMessage(responseData)
+	}
+
+	writeRequestLogRecord(c, s.cfg, rec)
+}
+
+// writeAnthropicRequestLogNonStreaming writes a request log entry for non-streaming Anthropic responses.
+func (s *GatewayService) writeAnthropicRequestLogNonStreaming(c *gin.Context, requestBody, responseBody []byte) {
+	if len(requestBody) == 0 && len(responseBody) == 0 {
 		return
 	}
 
-	filename := filepath.Join(dir, time.Now().Format("2006-01-02")+".jsonl")
-
-	requestLogMu.Lock()
-	defer requestLogMu.Unlock()
-
-	f, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		logger.FromContext(c.Request.Context()).Warn("request_log: open file failed", zap.Error(err))
-		return
+	resp := json.RawMessage(responseBody)
+	rec := requestLogRecord{
+		Ts:           time.Now().Unix(),
+		APIKeyID:     getAPIKeyIDFromContext(c),
+		RequestBody:  json.RawMessage(requestBody),
+		ResponseBody: &resp,
 	}
-	defer f.Close()
-	_, _ = f.Write(line)
+
+	writeRequestLogRecord(c, s.cfg, rec)
 }

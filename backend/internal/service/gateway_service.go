@@ -4448,7 +4448,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		firstTokenMs = streamResult.firstTokenMs
 		clientDisconnect = streamResult.clientDisconnect
 		// request_log: write Anthropic streaming response log asynchronously
-		if s.requestLogEnabled() && streamResult.finalResponseLog != nil {
+		if s.shouldLogRequest(c) && streamResult.finalResponseLog != nil {
 			go s.writeAnthropicRequestLog(c, originalBody, streamResult.finalResponseLog)
 		}
 	} else {
@@ -4458,7 +4458,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			return nil, err
 		}
 		// request_log: write Anthropic non-streaming response log asynchronously
-		if s.requestLogEnabled() && len(respBody) > 0 {
+		if s.shouldLogRequest(c) && len(respBody) > 0 {
 			go s.writeAnthropicRequestLogNonStreaming(c, originalBody, respBody)
 		}
 	}
@@ -4674,7 +4674,7 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthrough(
 		firstTokenMs = streamResult.firstTokenMs
 		clientDisconnect = streamResult.clientDisconnect
 		// request_log: write Anthropic passthrough streaming response log
-		if s.requestLogEnabled() && streamResult.finalResponseLog != nil {
+		if s.shouldLogRequest(c) && streamResult.finalResponseLog != nil {
 			go s.writeAnthropicRequestLog(c, body, streamResult.finalResponseLog)
 		}
 	} else {
@@ -4684,7 +4684,7 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthrough(
 			return nil, err
 		}
 		// request_log: write Anthropic passthrough non-streaming response log
-		if s.requestLogEnabled() && len(respBody) > 0 {
+		if s.shouldLogRequest(c) && len(respBody) > 0 {
 			go s.writeAnthropicRequestLogNonStreaming(c, body, respBody)
 		}
 	}
@@ -4796,7 +4796,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 
 	// request_log: accumulate SSE events for response reconstruction
 	var respAccumulator *anthropicResponseAccumulator
-	if s.requestLogEnabled() {
+	if s.shouldLogRequest(c) {
 		respAccumulator = newAnthropicResponseAccumulator()
 	}
 	var currentEventName string // tracks SSE event: name for accumulator
@@ -6072,7 +6072,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 
 	// request_log: 累积 Anthropic SSE 事件以重建最终响应 JSON
 	var respAccumulator *anthropicResponseAccumulator
-	if s.requestLogEnabled() {
+	if s.shouldLogRequest(c) {
 		respAccumulator = newAnthropicResponseAccumulator()
 	}
 

@@ -644,9 +644,10 @@ type GatewayUsageRecordConfig struct {
 
 // GatewayRequestLogConfig 请求/响应日志配置（JSONL 文件）
 type GatewayRequestLogConfig struct {
-	Enabled   bool     `mapstructure:"enabled"`
-	Dir       string   `mapstructure:"dir"`
-	Platforms []string `mapstructure:"platforms"`
+	Enabled        bool     `mapstructure:"enabled"`
+	Dir            string   `mapstructure:"dir"`
+	Platforms      []string `mapstructure:"platforms"`
+	ExcludedGroups []string `mapstructure:"excluded_groups"`
 }
 
 // SoraModelFiltersConfig Sora 模型过滤配置

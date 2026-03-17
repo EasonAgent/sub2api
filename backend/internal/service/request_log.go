@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 )
 
@@ -28,6 +29,27 @@ type requestLogRecord struct {
 // requestLogCfgEnabled checks if request logging is enabled in the config.
 func requestLogCfgEnabled(cfg *config.Config) bool {
 	return cfg != nil && cfg.Gateway.RequestLog.Enabled
+}
+
+// isGroupExcludedFromLog checks if the request's group is in the excluded list.
+func isGroupExcludedFromLog(c *gin.Context, cfg *config.Config) bool {
+	if c == nil || cfg == nil {
+		return false
+	}
+	excluded := cfg.Gateway.RequestLog.ExcludedGroups
+	if len(excluded) == 0 {
+		return false
+	}
+	group, ok := c.Request.Context().Value(ctxkey.Group).(*Group)
+	if !ok || group == nil {
+		return false
+	}
+	for _, name := range excluded {
+		if name == group.Name {
+			return true
+		}
+	}
+	return false
 }
 
 // writeRequestLogRecord writes a pre-built requestLogRecord to the JSONL file.
@@ -68,6 +90,10 @@ func (s *OpenAIGatewayService) requestLogEnabled() bool {
 	return requestLogCfgEnabled(s.cfg)
 }
 
+func (s *OpenAIGatewayService) shouldLogRequest(c *gin.Context) bool {
+	return s.requestLogEnabled() && !isGroupExcludedFromLog(c, s.cfg)
+}
+
 func (s *OpenAIGatewayService) writeRequestLog(c *gin.Context, requestBody, responseData []byte) {
 	if len(requestBody) == 0 && len(responseData) == 0 {
 		return
@@ -105,6 +131,10 @@ func (s *OpenAIGatewayService) writeRequestLogNonStreaming(c *gin.Context, reque
 
 func (s *GatewayService) requestLogEnabled() bool {
 	return requestLogCfgEnabled(s.cfg)
+}
+
+func (s *GatewayService) shouldLogRequest(c *gin.Context) bool {
+	return s.requestLogEnabled() && !isGroupExcludedFromLog(c, s.cfg)
 }
 
 // writeAnthropicRequestLog writes a request log entry for Anthropic streaming responses.

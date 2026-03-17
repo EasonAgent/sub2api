@@ -2161,7 +2161,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 		usage = streamResult.usage
 		firstTokenMs = streamResult.firstTokenMs
-		if s.requestLogEnabled() && streamResult.completedEventData != nil {
+		if s.shouldLogRequest(c) && streamResult.completedEventData != nil {
 			go s.writeRequestLog(c, originalBody, streamResult.completedEventData)
 		}
 	} else {
@@ -2325,7 +2325,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		}
 		usage = result.usage
 		firstTokenMs = result.firstTokenMs
-		if s.requestLogEnabled() && result.completedEventData != nil {
+		if s.shouldLogRequest(c) && result.completedEventData != nil {
 			go s.writeRequestLog(c, body, result.completedEventData)
 		}
 	} else {
@@ -2334,7 +2334,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		if err != nil {
 			return nil, err
 		}
-		if s.requestLogEnabled() && len(respBody) > 0 {
+		if s.shouldLogRequest(c) && len(respBody) > 0 {
 			go s.writeRequestLogNonStreaming(c, body, respBody)
 		}
 	}
